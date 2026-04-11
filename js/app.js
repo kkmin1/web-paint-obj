@@ -94,7 +94,7 @@ function syncPanelHeight() {
 }
 
 /* ── 키보드 단축키 ── */
-const TOOL_KEYS = { s:'select', v:'select', t:'text', c:'circle', e:'ellipse', r:'rect', l:'line', a:'arrow', d:'dashed' };
+const TOOL_KEYS = { s:'select', v:'select', t:'text', c:'circle', e:'ellipse', r:'rect', l:'line', a:'arrow', d:'dashed', f:'freehand', q:'quadratic', b:'cubic' };
 document.addEventListener('keydown', e => {
   if (document.getElementById('txt-inp').style.display !== 'none') return;
   const tag = e.target.tagName;

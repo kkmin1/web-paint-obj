@@ -46,6 +46,76 @@ function marker(color) {
   return `url(#${MC[key]})`;
 }
 
+function richSegments(text) {
+  const s = String(text || '');
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    if (i + 3 < s.length && s[i + 1] === '_' && s[i + 2] === '{') {
+      const base = s[i];
+      let j = i + 3, depth = 1, buf = '';
+      while (j < s.length && depth) {
+        if (s[j] === '{') { depth++; buf += s[j]; }
+        else if (s[j] === '}') { depth--; if (depth) buf += s[j]; }
+        else buf += s[j];
+        j++;
+      }
+      out.push({ kind:'base', text: base });
+      out.push({ kind:'sub', text: buf });
+      i = j;
+      continue;
+    }
+    out.push({ kind:'base', text: s[i] });
+    i++;
+  }
+  return out;
+}
+
+function bezierPath(points) {
+  if (!points || points.length < 2) return '';
+  if (points.length === 2) return `M ${points[0][0]} ${points[0][1]} L ${points[1][0]} ${points[1][1]}`;
+  const d = [`M ${points[0][0]} ${points[0][1]}`];
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i - 1] || points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[i + 2] || p2;
+    const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
+    const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
+    const cp2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d.push(`C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${p2[0]} ${p2[1]}`);
+  }
+  return d.join(' ');
+}
+
+function quadraticPath(o) {
+  return `M ${o.x1} ${o.y1} Q ${o.cx1} ${o.cy1} ${o.x2} ${o.y2}`;
+}
+
+function cubicPath(o) {
+  return `M ${o.x1} ${o.y1} C ${o.cx1} ${o.cy1}, ${o.cx2} ${o.cy2}, ${o.x2} ${o.y2}`;
+}
+
+function arcPoint(o, angleDeg) {
+  const rad = angleDeg * Math.PI / 180;
+  return {
+    x: o.cx + o.rx * Math.cos(rad),
+    y: o.cy + o.ry * Math.sin(rad),
+  };
+}
+
+function arcPath(o) {
+  const start = arcPoint(o, o.startAngle ?? 0);
+  const end = arcPoint(o, o.endAngle ?? 0);
+  let delta = (o.endAngle ?? 0) - (o.startAngle ?? 0);
+  while (delta <= -180) delta += 360;
+  while (delta > 180) delta -= 360;
+  const largeArc = Math.abs(delta) > 180 ? 1 : 0;
+  const sweep = delta >= 0 ? 1 : 0;
+  return `M ${start.x} ${start.y} A ${o.rx} ${o.ry} 0 ${largeArc} ${sweep} ${end.x} ${end.y}`;
+}
+
 /* ── 캔버스 크기 & 줌 ── */
 function applyCvSize() {
   const w = Math.round(cvW*zoom), h = Math.round(cvH*zoom);
@@ -92,14 +162,39 @@ function makeEl(o) {
     el = ns('ellipse', { cx:o.cx, cy:o.cy, rx:o.rx, ry:o.ry, fill:fillColor(o), stroke:o.stroke, 'stroke-width':o.sw, opacity:op });
   else if (o.type==='rect')
     el = ns('rect', { x:o.x, y:o.y, width:o.w, height:o.h, rx:o.rx??3, fill:fillColor(o), stroke:o.stroke, 'stroke-width':o.sw, opacity:op });
+  else if (o.type==='polyline')
+    el = ns('polyline', { points:(o.points||[]).map(p => `${p[0]},${p[1]}`).join(' '), fill:'none', stroke:o.stroke, 'stroke-width':o.sw, 'stroke-dasharray':o.dash==='dashed'?'8,5':o.dash==='dotted'?'2,5':'none', 'stroke-linecap':'round', 'stroke-linejoin':'round', opacity:op });
+  else if (o.type==='bezier')
+    el = ns('path', { d:bezierPath(o.points||[]), fill:'none', stroke:o.stroke, 'stroke-width':o.sw, 'stroke-dasharray':o.dash==='dashed'?'8,5':o.dash==='dotted'?'2,5':'none', 'stroke-linecap':'round', 'stroke-linejoin':'round', opacity:op });
+  else if (o.type==='quadratic')
+    el = ns('path', { d:quadraticPath(o), fill:'none', stroke:o.stroke, 'stroke-width':o.sw, 'stroke-dasharray':o.dash==='dashed'?'8,5':o.dash==='dotted'?'2,5':'none', 'stroke-linecap':'round', 'stroke-linejoin':'round', opacity:op });
+  else if (o.type==='cubic')
+    el = ns('path', { d:cubicPath(o), fill:'none', stroke:o.stroke, 'stroke-width':o.sw, 'stroke-dasharray':o.dash==='dashed'?'8,5':o.dash==='dotted'?'2,5':'none', 'stroke-linecap':'round', 'stroke-linejoin':'round', opacity:op });
+  else if (o.type==='arc')
+    el = ns('path', { d:arcPath(o), fill:'none', stroke:o.stroke, 'stroke-width':o.sw, 'stroke-dasharray':o.dash==='dashed'?'8,5':o.dash==='dotted'?'2,5':'none', 'stroke-linecap':'round', 'stroke-linejoin':'round', opacity:op });
+  else if (o.type==='polygon')
+    el = ns('polygon', { points:(o.points||[]).map(p => `${p[0]},${p[1]}`).join(' '), fill:fillColor(o), stroke:o.stroke, 'stroke-width':o.sw, 'stroke-dasharray':o.dash==='dashed'?'8,5':o.dash==='dotted'?'2,5':'none', 'stroke-linecap':'round', 'stroke-linejoin':'round', opacity:op });
   else if (isLine(o)) {
     const dash = o.dash==='dashed'?'8,5':o.dash==='dotted'?'2,5':'none';
     const me = (o.arrow==='end'||o.arrow==='both') ? marker(o.stroke) : 'none';
-    const ms = (o.arrow==='both') ? marker(o.stroke) : 'none';
+    const ms = (o.arrow==='start'||o.arrow==='both') ? marker(o.stroke) : 'none';
     el = ns('line', { x1:o.x1, y1:o.y1, x2:o.x2, y2:o.y2, stroke:o.stroke, 'stroke-width':o.sw, 'stroke-dasharray':dash, 'stroke-linecap':'round', 'marker-end':me, 'marker-start':ms, opacity:op });
   } else if (o.type==='text') {
     el = ns('text', { x:o.x, y:o.y, 'font-size':o.fs||14, fill:o.tc||'#1a1a18', 'font-weight':o.bold?'700':'400', 'font-style':o.italic?'italic':'normal', 'text-anchor':o.align||'middle', 'dominant-baseline':'central', 'font-family':"'Pretendard','Apple SD Gothic Neo',sans-serif", opacity:op });
-    el.textContent = o.text || '';
+    const parts = richSegments(o.text || '');
+    if (!parts.some(p => p.kind !== 'base')) el.textContent = o.text || '';
+    else {
+      parts.forEach(part => {
+        const t = ns('tspan', {});
+        if (part.kind === 'sub') {
+          t.setAttribute('baseline-shift', '-22%');
+          t.setAttribute('font-size', `${((o.fs||14) * 0.68).toFixed(1)}px`);
+          t.setAttribute('dx', `${-((o.fs||14) * 0.18).toFixed(1)}`);
+        }
+        t.textContent = part.text;
+        el.appendChild(t);
+      });
+    }
   } else if (o.type==='image') {
     el = ns('image', { x:o.x, y:o.y, width:o.w, height:o.h, href:o.href, preserveAspectRatio:'xMidYMid meet', opacity:op });
   }
@@ -113,6 +208,18 @@ function drawHandles(o) {
   if (isLine(o)) {
     [['l1',o.x1,o.y1],['l2',o.x2,o.y2]].forEach(([hid,hx,hy]) => {
       cvSvg.appendChild(ns('circle', { cx:hx, cy:hy, r:HANDLE_R, fill:'#fff', stroke:'#2563eb', 'stroke-width':'1.5', cursor:'move', 'data-handle':hid, 'data-oid':o.id }));
+    });
+  } else if (o.type==='quadratic') {
+    cvSvg.appendChild(ns('line', { x1:o.x1, y1:o.y1, x2:o.cx1, y2:o.cy1, stroke:'#60a5fa', 'stroke-width':'1', 'stroke-dasharray':'4,3', 'pointer-events':'none' }));
+    cvSvg.appendChild(ns('line', { x1:o.cx1, y1:o.cy1, x2:o.x2, y2:o.y2, stroke:'#60a5fa', 'stroke-width':'1', 'stroke-dasharray':'4,3', 'pointer-events':'none' }));
+    [['q1',o.x1,o.y1],['qc',o.cx1,o.cy1],['q2',o.x2,o.y2]].forEach(([hid,hx,hy]) => {
+      cvSvg.appendChild(ns('circle', { cx:hx, cy:hy, r:HANDLE_R, fill:hid==='qc'?'#dbeafe':'#fff', stroke:'#2563eb', 'stroke-width':'1.5', cursor:'move', 'data-handle':hid, 'data-oid':o.id }));
+    });
+  } else if (o.type==='cubic') {
+    cvSvg.appendChild(ns('line', { x1:o.x1, y1:o.y1, x2:o.cx1, y2:o.cy1, stroke:'#60a5fa', 'stroke-width':'1', 'stroke-dasharray':'4,3', 'pointer-events':'none' }));
+    cvSvg.appendChild(ns('line', { x1:o.cx2, y1:o.cy2, x2:o.x2, y2:o.y2, stroke:'#60a5fa', 'stroke-width':'1', 'stroke-dasharray':'4,3', 'pointer-events':'none' }));
+    [['c1',o.x1,o.y1],['cc1',o.cx1,o.cy1],['cc2',o.cx2,o.cy2],['c2',o.x2,o.y2]].forEach(([hid,hx,hy]) => {
+      cvSvg.appendChild(ns('circle', { cx:hx, cy:hy, r:HANDLE_R, fill:hid.startsWith('cc')?'#dbeafe':'#fff', stroke:'#2563eb', 'stroke-width':'1.5', cursor:'move', 'data-handle':hid, 'data-oid':o.id }));
     });
   } else {
     const hx = [bb.x-pad, bb.x+bb.w/2, bb.x+bb.w+pad];

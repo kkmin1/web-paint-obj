@@ -42,21 +42,505 @@ function download(href, name) {
   setTimeout(() => URL.revokeObjectURL(href), 1000);
 }
 
+async function saveBlobWithPicker(blob, suggestedName, types, fallbackHref = null) {
+  try {
+    if (window.showSaveFilePicker) {
+      const handle = await window.showSaveFilePicker({ suggestedName, types });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return true;
+    }
+  } catch (err) {
+    if (err && err.name === 'AbortError') return false;
+    console.warn('save picker failed, falling back to download', err);
+  }
+  download(fallbackHref || URL.createObjectURL(blob), suggestedName);
+  return true;
+}
+
+function dataUrlToBlob(dataUrl) {
+  const [head, body] = String(dataUrl).split(',', 2);
+  const mime = (head.match(/^data:([^;]+)/i) || [null, 'application/octet-stream'])[1];
+  const binary = atob(body || '');
+  const arr = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) arr[i] = binary.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+
+async function saveTikzBundleWithPicker(bundle, baseName) {
+  if (!bundle.assets.length) {
+    const blob = new Blob([bundle.tex], { type:'text/x-tex;charset=utf-8' });
+    return saveBlobWithPicker(
+      blob,
+      `${baseName}.tex`,
+      [{ description:'TeX files', accept:{ 'text/x-tex':['.tex'] } }]
+    );
+  }
+
+  try {
+    if (window.showDirectoryPicker) {
+      const dir = await window.showDirectoryPicker({ mode:'readwrite' });
+      const texHandle = await dir.getFileHandle(`${baseName}.tex`, { create:true });
+      const texWritable = await texHandle.createWritable();
+      await texWritable.write(new Blob([bundle.tex], { type:'text/x-tex;charset=utf-8' }));
+      await texWritable.close();
+
+      for (const asset of bundle.assets) {
+        const fileHandle = await dir.getFileHandle(asset.fileName, { create:true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(dataUrlToBlob(asset.href));
+        await writable.close();
+      }
+      return true;
+    }
+  } catch (err) {
+    if (err && err.name === 'AbortError') return false;
+    console.warn('directory picker failed, falling back to downloads', err);
+  }
+
+  download(
+    URL.createObjectURL(new Blob([bundle.tex], { type:'text/x-tex;charset=utf-8' })),
+    `${baseName}.tex`
+  );
+  bundle.assets.forEach(asset => download(asset.href, asset.fileName));
+  return true;
+}
+
+function texEsc(s) {
+  return String(s ?? '')
+    .replace(/\\/g, '\\textbackslash{}')
+    .replace(/\{/g, '\\{')
+    .replace(/\}/g, '\\}')
+    .replace(/#/g, '\\#')
+    .replace(/\$/g, '\\$')
+    .replace(/%/g, '\\%')
+    .replace(/&/g, '\\&')
+    .replace(/_/g, '\\_');
+}
+
+function num(v) {
+  let s = Number(v).toFixed(2);
+  s = s.replace(/\.?0+$/, '');
+  return s || '0';
+}
+
+function tikzX(x) { return num(x / 40); }
+function tikzY(y) { return num((cvH - y) / 40); }
+
+function colorDef(hex, prefix, defs, seen) {
+  const raw = String(hex || '').trim();
+  if (!raw || raw === 'none') return 'none';
+  const h = raw.replace('#', '');
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return raw;
+  const name = `${prefix}${h.toLowerCase()}`;
+  const line = `\\definecolor{${name}}{HTML}{${h.toUpperCase()}}`;
+  if (!seen.has(line)) {
+    seen.add(line);
+    defs.push(line);
+  }
+  return name;
+}
+
+function tikzStyle(o, strokeName, extra = []) {
+  const parts = [...extra, `draw=${strokeName}`, `line width=${num((o.sw ?? 1.5) / 1.5)}pt`];
+  if (o.dash === 'dashed') parts.push('dashed');
+  else if (o.dash === 'dotted') parts.push('dotted');
+  if (o.arrow === 'end') parts.push('->');
+  else if (o.arrow === 'start') parts.push('<-');
+  else if (o.arrow === 'both') parts.push('<->');
+  if ((o.opacity ?? 1) !== 1) parts.push(`opacity=${num(o.opacity ?? 1)}`);
+  return parts.join(', ');
+}
+
+function tikzFill(o, fillName) {
+  const parts = [];
+  if (!o.fillNone && fillName !== 'none') {
+    parts.push(`fill=${fillName}`);
+    if ((o.fillOpacity ?? 100) < 100) parts.push(`fill opacity=${num((o.fillOpacity ?? 100) / 100)}`);
+  }
+  return parts;
+}
+
+function polyPoints(points, closed = false) {
+  let s = (points || []).map(([x, y]) => `(${tikzX(x)}, ${tikzY(y)})`).join(' -- ');
+  if (closed) s += ' -- cycle';
+  return s;
+}
+
+function catmullRomSegments(points) {
+  const segs = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = i > 0 ? points[i - 1] : points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = i + 2 < points.length ? points[i + 2] : p2;
+    segs.push({
+      cp1x: p1[0] + (p2[0] - p0[0]) / 6,
+      cp1y: p1[1] + (p2[1] - p0[1]) / 6,
+      cp2x: p2[0] - (p3[0] - p1[0]) / 6,
+      cp2y: p2[1] - (p3[1] - p1[1]) / 6,
+      x: p2[0],
+      y: p2[1],
+    });
+  }
+  return segs;
+}
+
+function arcPoint(o, angleDeg) {
+  const r = angleDeg * Math.PI / 180;
+  return { x: o.cx + o.rx * Math.cos(r), y: o.cy + o.ry * Math.sin(r) };
+}
+
+function dataUrlMeta(href, index) {
+  const m = String(href || '').match(/^data:([^;,]+)?(;base64)?,/i);
+  if (!m) return null;
+  const mime = (m[1] || 'application/octet-stream').toLowerCase();
+  const ext = ({
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/svg+xml': 'svg',
+  })[mime] || 'bin';
+  return { mime, ext, fileName: `ks_image_${index}.${ext}` };
+}
+
+function arcToCubics(o) {
+  const start = Number(o.startAngle ?? 0);
+  const end = Number(o.endAngle ?? 0);
+  let delta = end - start;
+  while (delta <= -180) delta += 360;
+  while (delta > 180) delta -= 360;
+  const steps = Math.max(1, Math.ceil(Math.abs(delta) / 90));
+  const segs = [];
+  for (let i = 0; i < steps; i++) {
+    const a0 = start + (delta * i / steps);
+    const a1 = start + (delta * (i + 1) / steps);
+    const r0 = a0 * Math.PI / 180;
+    const r1 = a1 * Math.PI / 180;
+    const k = (4 / 3) * Math.tan((r1 - r0) / 4);
+    const p0 = { x: o.cx + o.rx * Math.cos(r0), y: o.cy + o.ry * Math.sin(r0) };
+    const p3 = { x: o.cx + o.rx * Math.cos(r1), y: o.cy + o.ry * Math.sin(r1) };
+    const cp1 = { x: p0.x - k * o.rx * Math.sin(r0), y: p0.y + k * o.ry * Math.cos(r0) };
+    const cp2 = { x: p3.x + k * o.rx * Math.sin(r1), y: p3.y - k * o.ry * Math.cos(r1) };
+    segs.push({ p0, cp1, cp2, p3 });
+  }
+  return segs;
+}
+
+function buildTikzBundle(baseName = `ks_diagram_${ts()}`) {
+  const defs = [];
+  const seen = new Set();
+  const out = [];
+  const warnings = [];
+  const assets = [];
+  let imageIndex = 1;
+
+  objects.forEach(o => {
+    const stroke = colorDef(o.stroke || '#000000', 'draw', defs, seen);
+    const fill = colorDef(o.fill || '#ffffff', 'fill', defs, seen);
+    const text = colorDef(o.tc || '#000000', 'text', defs, seen);
+
+    if (o.type === 'line') {
+      out.push(`  \\draw[${tikzStyle(o, stroke)}] (${tikzX(o.x1)}, ${tikzY(o.y1)}) -- (${tikzX(o.x2)}, ${tikzY(o.y2)});`);
+    } else if (o.type === 'polyline') {
+      out.push(`  \\draw[${tikzStyle(o, stroke)}] ${polyPoints(o.points, false)};`);
+    } else if (o.type === 'polygon') {
+      out.push(`  \\draw[${tikzStyle(o, stroke, tikzFill(o, fill))}] ${polyPoints(o.points, true)};`);
+    } else if (o.type === 'rect') {
+      out.push(`  \\draw[${tikzStyle(o, stroke, tikzFill(o, fill))}] (${tikzX(o.x)}, ${tikzY(o.y)}) rectangle (${tikzX(o.x + o.w)}, ${tikzY(o.y + o.h)});`);
+    } else if (o.type === 'circle') {
+      out.push(`  \\draw[${tikzStyle(o, stroke, tikzFill(o, fill))}] (${tikzX(o.cx)}, ${tikzY(o.cy)}) circle (${num(o.r / 40)}cm);`);
+    } else if (o.type === 'ellipse') {
+      out.push(`  \\draw[${tikzStyle(o, stroke, tikzFill(o, fill))}] (${tikzX(o.cx)}, ${tikzY(o.cy)}) ellipse (${num(o.rx / 40)}cm and ${num(o.ry / 40)}cm);`);
+    } else if (o.type === 'arc') {
+      const segs = arcToCubics(o);
+      if (!segs.length) return;
+      const parts = [`(${tikzX(segs[0].p0.x)}, ${tikzY(segs[0].p0.y)})`];
+      segs.forEach(seg => {
+        parts.push(`.. controls (${tikzX(seg.cp1.x)}, ${tikzY(seg.cp1.y)}) and (${tikzX(seg.cp2.x)}, ${tikzY(seg.cp2.y)}) .. (${tikzX(seg.p3.x)}, ${tikzY(seg.p3.y)})`);
+      });
+      out.push(`  \\draw[${tikzStyle(o, stroke)}] ${parts.join(' ')};`);
+    } else if (o.type === 'text') {
+      const extra = [`text=${text}`, `font=\\fontsize{${o.fs || 14}}{${(o.fs || 14) + 2}}\\selectfont`];
+      if ((o.opacity ?? 1) !== 1) extra.push(`opacity=${num(o.opacity ?? 1)}`);
+      if (o.align === 'start') extra.push('anchor=west');
+      else if (o.align === 'end') extra.push('anchor=east');
+      out.push(`  \\node[${extra.join(', ')}] at (${tikzX(o.x)}, ${tikzY(o.y)}) {${texEsc(o.text || '')}};`);
+    } else if (o.type === 'quadratic') {
+      out.push(`  \\draw[${tikzStyle(o, stroke)}] (${tikzX(o.x1)}, ${tikzY(o.y1)}) .. controls (${tikzX(o.cx1)}, ${tikzY(o.cy1)}) .. (${tikzX(o.x2)}, ${tikzY(o.y2)});`);
+    } else if (o.type === 'cubic') {
+      out.push(`  \\draw[${tikzStyle(o, stroke)}] (${tikzX(o.x1)}, ${tikzY(o.y1)}) .. controls (${tikzX(o.cx1)}, ${tikzY(o.cy1)}) and (${tikzX(o.cx2)}, ${tikzY(o.cy2)}) .. (${tikzX(o.x2)}, ${tikzY(o.y2)});`);
+    } else if (o.type === 'bezier') {
+      const pts = o.points || [];
+      if (pts.length < 2) return;
+      const parts = [`(${tikzX(pts[0][0])}, ${tikzY(pts[0][1])})`];
+      catmullRomSegments(pts).forEach(seg => {
+        parts.push(`.. controls (${tikzX(seg.cp1x)}, ${tikzY(seg.cp1y)}) and (${tikzX(seg.cp2x)}, ${tikzY(seg.cp2y)}) .. (${tikzX(seg.x)}, ${tikzY(seg.y)})`);
+      });
+      out.push(`  \\draw[${tikzStyle(o, stroke)}] ${parts.join(' ')};`);
+    } else if (o.type === 'image') {
+      const meta = dataUrlMeta(o.href, imageIndex);
+      if (!meta) {
+        warnings.push(`image skipped at (${o.x}, ${o.y})`);
+        out.push(`  % image skipped at (${o.x}, ${o.y}) size ${o.w}x${o.h}`);
+      } else {
+        imageIndex += 1;
+        assets.push({ fileName: meta.fileName, href: o.href });
+        warnings.push(`requires \\usepackage{graphicx} for ${meta.fileName}`);
+        const opacity = (o.opacity ?? 1) !== 1 ? `, opacity=${num(o.opacity ?? 1)}` : '';
+        out.push(`  \\node[anchor=north west, inner sep=0${opacity}] at (${tikzX(o.x)}, ${tikzY(o.y)}) {\\includegraphics[width=${num(o.w / 40)}cm,height=${num(o.h / 40)}cm]{${meta.fileName}}};`);
+      }
+    } else {
+      warnings.push(`unsupported object type: ${o.type}`);
+      out.push(`  % unsupported object skipped: ${o.type}`);
+    }
+  });
+
+  const header = [];
+  if (warnings.length) {
+    header.push('% warnings:');
+    warnings.forEach(w => header.push(`% - ${w}`));
+    header.push('');
+  }
+  if (defs.length) {
+    header.push(...defs, '');
+  }
+  return {
+    tex: `${header.join('\n')}\\begin{tikzpicture}\n${out.join('\n')}\n\\end{tikzpicture}\n`,
+    assets,
+  };
+}
+
+function buildTikz() {
+  return buildTikzBundle().tex;
+}
+
+function textNodeForObject(o) {
+  if (o.type !== 'text') return null;
+  const approxW = Math.max(24, Math.round((String(o.text || '').length || 1) * (o.fs || 14) * 0.65));
+  const approxH = Math.max(18, Math.round((o.fs || 14) * 1.4));
+  return {
+    id: `node-text-${o.id}`,
+    type: 'text',
+    x: Math.round(o.x - approxW / 2),
+    y: Math.round(o.y - approxH / 2),
+    width: approxW,
+    height: approxH,
+    text: String(o.text || ''),
+    color: 'transparent',
+    fill: 'transparent',
+    opacity: Math.round((o.opacity ?? 1) * 100),
+    textColor: o.tc || '#000000',
+    fontSize: o.fs || 14,
+    thickness: 0,
+    lineStyle: 'solid',
+  };
+}
+
+function buildWtikz() {
+  const nodes = [];
+  const edges = [];
+  const beziers = [];
+  const quadratics = [];
+  const quartics = [];
+  const plots = [];
+  let seq = 1;
+
+  function nextId(prefix) {
+    seq += 1;
+    return `${prefix}-${Date.now()}-${seq}`;
+  }
+
+  objects.forEach(o => {
+    if (o.type === 'rect') {
+      nodes.push({
+        id: nextId('node'),
+        type: 'rectangle',
+        x: o.x,
+        y: o.y,
+        width: o.w,
+        height: o.h,
+        text: '',
+        color: o.stroke || '#64748b',
+        fill: o.fillNone ? '#ffffff' : (o.fill || '#ffffff'),
+        opacity: Math.round((o.opacity ?? 1) * 100),
+        textColor: '#000000',
+        fontSize: 14,
+        thickness: Math.max(1, Math.round(o.sw || 1)),
+        lineStyle: o.dash === 'dashed' ? 'dashed' : o.dash === 'dotted' ? 'dotted' : 'solid',
+      });
+    } else if (o.type === 'circle' || o.type === 'ellipse') {
+      nodes.push({
+        id: nextId('node'),
+        type: 'circle',
+        x: Math.round(o.cx - (o.type === 'circle' ? o.r : o.rx)),
+        y: Math.round(o.cy - (o.type === 'circle' ? o.r : o.ry)),
+        width: Math.round((o.type === 'circle' ? o.r : o.rx) * 2),
+        height: Math.round((o.type === 'circle' ? o.r : o.ry) * 2),
+        text: '',
+        color: o.stroke || '#64748b',
+        fill: o.fillNone ? '#ffffff' : (o.fill || '#ffffff'),
+        opacity: Math.round((o.opacity ?? 1) * 100),
+        textColor: '#000000',
+        fontSize: 14,
+        thickness: Math.max(1, Math.round(o.sw || 1)),
+        lineStyle: o.dash === 'dashed' ? 'dashed' : o.dash === 'dotted' ? 'dotted' : 'solid',
+      });
+    } else if (o.type === 'text') {
+      nodes.push(textNodeForObject(o));
+    } else if (o.type === 'line') {
+      edges.push({
+        id: nextId('edge'),
+        x1: o.x1,
+        y1: o.y1,
+        x2: o.x2,
+        y2: o.y2,
+        style: o.dash === 'dashed' ? 'dashed' : o.dash === 'dotted' ? 'dotted' : 'solid',
+        arrow: o.arrow && o.arrow !== 'none',
+        arrowCount: 1,
+        arrowMode: o.arrow === 'start' ? 'backward' : 'forward',
+        arrowFlipPoints: '0.5',
+        color: o.stroke || '#64748b',
+        thickness: Math.max(1, Math.round(o.sw || 1)),
+      });
+    } else if (o.type === 'quadratic') {
+      quadratics.push({
+        id: nextId('quad'),
+        x1: o.x1, y1: o.y1, x2: o.x2, y2: o.y2,
+        cpx: o.cx1, cpy: o.cy1,
+        color: o.stroke || '#64748b',
+        thickness: Math.max(1, Math.round(o.sw || 1)),
+        style: o.dash === 'dashed' ? 'dashed' : o.dash === 'dotted' ? 'dotted' : 'solid',
+        arrow: o.arrow && o.arrow !== 'none',
+        arrowCount: 1,
+        arrowMode: o.arrow === 'start' ? 'backward' : 'forward',
+        arrowFlipPoints: '0.5',
+      });
+    } else if (o.type === 'cubic') {
+      beziers.push({
+        id: nextId('bezier'),
+        x1: o.x1, y1: o.y1, x2: o.x2, y2: o.y2,
+        cp1x: o.cx1, cp1y: o.cy1, cp2x: o.cx2, cp2y: o.cy2,
+        color: o.stroke || '#64748b',
+        thickness: Math.max(1, Math.round(o.sw || 1)),
+        style: o.dash === 'dashed' ? 'dashed' : o.dash === 'dotted' ? 'dotted' : 'solid',
+        arrow: o.arrow && o.arrow !== 'none',
+        arrowCount: 1,
+        arrowMode: o.arrow === 'start' ? 'backward' : 'forward',
+        arrowFlipPoints: '0.5',
+      });
+    } else if (o.type === 'bezier') {
+      const pts = o.points || [];
+      catmullRomSegments(pts).forEach((seg, i) => {
+        const p0 = i === 0 ? pts[0] : pts[i];
+        beziers.push({
+          id: nextId('bezier'),
+          x1: p0[0], y1: p0[1], x2: seg.x, y2: seg.y,
+          cp1x: seg.cp1x, cp1y: seg.cp1y, cp2x: seg.cp2x, cp2y: seg.cp2y,
+          color: o.stroke || '#64748b',
+          thickness: Math.max(1, Math.round(o.sw || 1)),
+          style: o.dash === 'dashed' ? 'dashed' : o.dash === 'dotted' ? 'dotted' : 'solid',
+          arrow: false,
+          arrowCount: 1,
+          arrowMode: 'forward',
+          arrowFlipPoints: '0.5',
+        });
+      });
+    } else if (o.type === 'polyline' || o.type === 'polygon') {
+      const pts = o.points || [];
+      for (let i = 1; i < pts.length; i++) {
+        edges.push({
+          id: nextId('edge'),
+          x1: pts[i - 1][0], y1: pts[i - 1][1], x2: pts[i][0], y2: pts[i][1],
+          style: o.dash === 'dashed' ? 'dashed' : o.dash === 'dotted' ? 'dotted' : 'solid',
+          arrow: false,
+          arrowCount: 1,
+          arrowMode: 'forward',
+          arrowFlipPoints: '0.5',
+          color: o.stroke || '#64748b',
+          thickness: Math.max(1, Math.round(o.sw || 1)),
+        });
+      }
+      if (o.type === 'polygon' && pts.length > 2) {
+        edges.push({
+          id: nextId('edge'),
+          x1: pts[pts.length - 1][0], y1: pts[pts.length - 1][1], x2: pts[0][0], y2: pts[0][1],
+          style: o.dash === 'dashed' ? 'dashed' : o.dash === 'dotted' ? 'dotted' : 'solid',
+          arrow: false,
+          arrowCount: 1,
+          arrowMode: 'forward',
+          arrowFlipPoints: '0.5',
+          color: o.stroke || '#64748b',
+          thickness: Math.max(1, Math.round(o.sw || 1)),
+        });
+      }
+    } else if (o.type === 'arc') {
+      arcToCubics(o).forEach(seg => {
+        beziers.push({
+          id: nextId('bezier'),
+          x1: seg.p0.x, y1: seg.p0.y, x2: seg.p3.x, y2: seg.p3.y,
+          cp1x: seg.cp1.x, cp1y: seg.cp1.y, cp2x: seg.cp2.x, cp2y: seg.cp2.y,
+          color: o.stroke || '#64748b',
+          thickness: Math.max(1, Math.round(o.sw || 1)),
+          style: o.dash === 'dashed' ? 'dashed' : o.dash === 'dotted' ? 'dotted' : 'solid',
+          arrow: false,
+          arrowCount: 1,
+          arrowMode: 'forward',
+          arrowFlipPoints: '0.5',
+        });
+      });
+    }
+  });
+
+  return { nodes, edges, beziers, quadratics, quartics, plots, canvasW: Math.round(cvW), canvasH: Math.round(cvH) };
+}
+
 /* ════════════════════════════
    저장 드롭다운
 ════════════════════════════ */
-document.getElementById('save-gtree').addEventListener('click', () => {
+document.getElementById('save-gtree').addEventListener('click', async () => {
   closeDropdowns();
   const data = { version:1, appName:'KS 이미지 에디터', savedAt:new Date().toISOString(), cvW, cvH, objects: JSON.parse(JSON.stringify(objects)) };
   const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
-  download(URL.createObjectURL(blob), `ks_diagram_${ts()}.gtree`);
+  const name = `ks_diagram_${ts()}.gtree`;
+  await saveBlobWithPicker(
+    blob,
+    name,
+    [{ description:'GTree files', accept:{ 'application/json':['.gtree','.json'] } }]
+  );
 });
 
-document.getElementById('save-svg').addEventListener('click', () => {
+document.getElementById('save-svg').addEventListener('click', async () => {
   closeDropdowns();
   const { clone } = cloneSvg();
   const blob = new Blob([clone.outerHTML], {type:'image/svg+xml'});
-  download(URL.createObjectURL(blob), `ks_diagram_${ts()}.svg`);
+  const name = `ks_diagram_${ts()}.svg`;
+  await saveBlobWithPicker(
+    blob,
+    name,
+    [{ description:'SVG files', accept:{ 'image/svg+xml':['.svg'] } }]
+  );
+});
+
+document.getElementById('save-tex').addEventListener('click', async () => {
+  closeDropdowns();
+  const base = `ks_diagram_${ts()}`;
+  const bundle = buildTikzBundle(base);
+  await saveTikzBundleWithPicker(bundle, base);
+});
+
+document.getElementById('save-wtikz').addEventListener('click', async () => {
+  closeDropdowns();
+  const blob = new Blob([JSON.stringify(buildWtikz(), null, 2)], {type:'application/wtikz'});
+  const name = `ks_diagram_${ts()}.wtikz`;
+  await saveBlobWithPicker(
+    blob,
+    name,
+    [{ description:'WTIKZ files', accept:{ 'application/wtikz':['.wtikz','.json'] } }]
+  );
 });
 
 document.getElementById('save-png').addEventListener('click', () => {

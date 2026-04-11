@@ -3,8 +3,77 @@
  */
 
 const txtInp = document.getElementById('txt-inp');
-const TOOL_LABEL = { select:'선택', text:'텍스트', circle:'원', ellipse:'타원', rect:'사각형', line:'직선', arrow:'화살표', dashed:'점선', 'dashed-arrow':'점선↗', bidir:'양방향' };
-const TYPE_NAME  = { circle:'원', ellipse:'타원', rect:'사각형', line:'직선', arrow:'화살표', dashed:'점선', 'dashed-arrow':'점선↗', bidir:'양방향', text:'텍스트', image:'이미지' };
+const TOOL_LABEL = { select:'선택', text:'텍스트', circle:'원', ellipse:'타원', rect:'사각형', line:'직선', arrow:'화살표', dashed:'점선', 'dashed-arrow':'점선↗', bidir:'양방향', freehand:'자유곡선', quadratic:'2차곡선', cubic:'3차곡선' };
+const TYPE_NAME  = { circle:'원', ellipse:'타원', arc:'호', rect:'사각형', line:'직선', arrow:'화살표', dashed:'점선', 'dashed-arrow':'점선↗', bidir:'양방향', text:'텍스트', image:'이미지', polyline:'연속선', polygon:'다각형', freehand:'자유곡선', bezier:'스플라인', quadratic:'2차곡선', cubic:'3차곡선' };
+
+function defaultQuadraticControl(p0, p) {
+  const mx = (p0.x + p.x) / 2;
+  const my = (p0.y + p.y) / 2;
+  const dx = p.x - p0.x;
+  const dy = p.y - p0.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len;
+  const ny = dx / len;
+  const bend = Math.max(30, len * 0.25);
+  return { x: mx + nx * bend, y: my + ny * bend };
+}
+
+function defaultCubicControls(p0, p) {
+  const dx = p.x - p0.x;
+  const dy = p.y - p0.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len;
+  const ny = dx / len;
+  const bend = Math.max(24, len * 0.18);
+  return {
+    c1x: p0.x + dx / 3 + nx * bend,
+    c1y: p0.y + dy / 3 + ny * bend,
+    c2x: p0.x + dx * 2 / 3 - nx * bend,
+    c2y: p0.y + dy * 2 / 3 - ny * bend,
+  };
+}
+
+function resizeBoxFromHandle(snap, h, dx, dy) {
+  let x = snap.x, y = snap.y, w = snap.w, sh = snap.h;
+  if(h==='tl'){x=snap.x+dx;y=snap.y+dy;w=snap.w-dx;sh=snap.h-dy;}
+  if(h==='tc'){y=snap.y+dy;sh=snap.h-dy;}
+  if(h==='tr'){y=snap.y+dy;w=snap.w+dx;sh=snap.h-dy;}
+  if(h==='mr'){w=snap.w+dx;}
+  if(h==='br'){w=snap.w+dx;sh=snap.h+dy;}
+  if(h==='bc'){sh=snap.h+dy;}
+  if(h==='bl'){x=snap.x+dx;w=snap.w-dx;sh=snap.h+dy;}
+  if(h==='ml'){x=snap.x+dx;w=snap.w-dx;}
+  return { x, y, w: Math.max(4, w), h: Math.max(4, sh) };
+}
+
+function scalePointInBox(px, py, from, to) {
+  const sx = from.w ? (px - from.x) / from.w : 0.5;
+  const sy = from.h ? (py - from.y) / from.h : 0.5;
+  return {
+    x: to.x + sx * to.w,
+    y: to.y + sy * to.h,
+  };
+}
+
+function scalePointShape(o, snap, h, dx, dy) {
+  const bb = bbox(snap);
+  if (!bb) return;
+  const next = resizeBoxFromHandle(bb, h, dx, dy);
+  o.points = (snap.points || []).map(([x, y]) => {
+    const p = scalePointInBox(x, y, bb, next);
+    return [p.x, p.y];
+  });
+}
+
+function scaleArcShape(o, snap, h, dx, dy) {
+  const bb = bbox(snap);
+  if (!bb) return;
+  const next = resizeBoxFromHandle(bb, h, dx, dy);
+  o.cx = next.x + next.w / 2;
+  o.cy = next.y + next.h / 2;
+  o.rx = next.w / 2;
+  o.ry = next.h / 2;
+}
 
 /* ── 도구 전환 ── */
 function switchTool(t) {
@@ -75,16 +144,23 @@ function onDbl(e) {
 function applyHandle(o, snap, h, p) {
   const dx=p.x-dragP0.x, dy=p.y-dragP0.y;
   if (isLine(o)) { if(h==='l1'){o.x1=snap.x1+dx;o.y1=snap.y1+dy;}else{o.x2=snap.x2+dx;o.y2=snap.y2+dy;} return; }
+  if (o.type==='quadratic') {
+    if (h==='q1') { o.x1=snap.x1+dx; o.y1=snap.y1+dy; }
+    if (h==='qc') { o.cx1=snap.cx1+dx; o.cy1=snap.cy1+dy; }
+    if (h==='q2') { o.x2=snap.x2+dx; o.y2=snap.y2+dy; }
+    return;
+  }
+  if (o.type==='cubic') {
+    if (h==='c1') { o.x1=snap.x1+dx; o.y1=snap.y1+dy; }
+    if (h==='cc1') { o.cx1=snap.cx1+dx; o.cy1=snap.cy1+dy; }
+    if (h==='cc2') { o.cx2=snap.cx2+dx; o.cy2=snap.cy2+dy; }
+    if (h==='c2') { o.x2=snap.x2+dx; o.y2=snap.y2+dy; }
+    return;
+  }
+  if (o.type==='polyline' || o.type==='polygon' || o.type==='bezier') { scalePointShape(o, snap, h, dx, dy); return; }
+  if (o.type==='arc') { scaleArcShape(o, snap, h, dx, dy); return; }
   if (o.type==='rect'||o.type==='image') {
-    let{x,y,w,h:sh}={x:snap.x,y:snap.y,w:snap.w,h:snap.h};
-    if(h==='tl'){x=snap.x+dx;y=snap.y+dy;w=snap.w-dx;sh=snap.h-dy;}
-    if(h==='tc'){y=snap.y+dy;sh=snap.h-dy;}
-    if(h==='tr'){y=snap.y+dy;w=snap.w+dx;sh=snap.h-dy;}
-    if(h==='mr'){w=snap.w+dx;}
-    if(h==='br'){w=snap.w+dx;sh=snap.h+dy;}
-    if(h==='bc'){sh=snap.h+dy;}
-    if(h==='bl'){x=snap.x+dx;w=snap.w-dx;sh=snap.h+dy;}
-    if(h==='ml'){x=snap.x+dx;w=snap.w-dx;}
+    let{x,y,w,h:sh}=resizeBoxFromHandle({x:snap.x,y:snap.y,w:snap.w,h:snap.h},h,dx,dy);
     o.x=x;o.y=y;o.w=Math.max(4,w);o.h=Math.max(4,sh); return;
   }
   if (o.type==='circle') { o.r=Math.max(4,Math.max(Math.abs(p.x-snap.cx),Math.abs(p.y-snap.cy))); return; }
@@ -97,10 +173,14 @@ function applyHandle(o, snap, h, p) {
 
 /* ── 오브젝트 팩토리 ── */
 function makeNewObj(type, p) {
-  const base={id:uid(),type,stroke:D.stroke,sw:D.sw,fill:D.fill,fillNone:D.fillNone,fillOpacity:D.fillOpacity,opacity:1};
+  const id=uid();
+  const base={id,type,stroke:D.stroke,sw:D.sw,fill:D.fill,fillNone:D.fillNone,fillOpacity:D.fillOpacity,opacity:1};
   if(type==='circle')       return{...base,cx:p.x,cy:p.y,r:2};
   if(type==='ellipse')      return{...base,cx:p.x,cy:p.y,rx:2,ry:2};
   if(type==='rect')         return{...base,x:p.x,y:p.y,w:2,h:2,rx:3};
+  if(type==='freehand')     return{id,type:'polyline',points:[[p.x,p.y]],stroke:D.stroke,sw:D.sw,dash:'none',arrow:'none',opacity:1};
+  if(type==='quadratic')    return{id,type:'quadratic',x1:p.x,y1:p.y,cx1:p.x,cy1:p.y,x2:p.x,y2:p.y,stroke:D.stroke,sw:D.sw,dash:'none',opacity:1};
+  if(type==='cubic')        return{id,type:'cubic',x1:p.x,y1:p.y,cx1:p.x,cy1:p.y,cx2:p.x,cy2:p.y,x2:p.x,y2:p.y,stroke:D.stroke,sw:D.sw,dash:'none',opacity:1};
   if(type==='line')         return{...base,x1:p.x,y1:p.y,x2:p.x,y2:p.y,arrow:'none',dash:'none'};
   if(type==='arrow')        return{...base,x1:p.x,y1:p.y,x2:p.x,y2:p.y,arrow:'end',dash:'none'};
   if(type==='dashed')       return{...base,x1:p.x,y1:p.y,x2:p.x,y2:p.y,arrow:'none',dash:'dashed'};
@@ -112,12 +192,35 @@ function updateDrawing(o,p0,p){
   if(o.type==='circle')  o.r=Math.max(2,Math.hypot(p.x-p0.x,p.y-p0.y));
   if(o.type==='ellipse'){o.cx=(p0.x+p.x)/2;o.cy=(p0.y+p.y)/2;o.rx=Math.max(2,Math.abs(p.x-p0.x)/2);o.ry=Math.max(2,Math.abs(p.y-p0.y)/2);}
   if(o.type==='rect'){o.x=Math.min(p0.x,p.x);o.y=Math.min(p0.y,p.y);o.w=Math.max(2,Math.abs(p.x-p0.x));o.h=Math.max(2,Math.abs(p.y-p0.y));}
+  if(o.type==='polyline'){
+    const pts=o.points||[];
+    const last=pts[pts.length-1];
+    if(!last || Math.hypot(p.x-last[0], p.y-last[1]) >= 2) pts.push([p.x,p.y]);
+    o.points=pts;
+  }
+  if(o.type==='quadratic'){
+    const c=defaultQuadraticControl(p0,p);
+    o.x2=p.x; o.y2=p.y; o.cx1=c.x; o.cy1=c.y;
+  }
+  if(o.type==='cubic'){
+    const c=defaultCubicControls(p0,p);
+    o.x2=p.x; o.y2=p.y; o.cx1=c.c1x; o.cy1=c.c1y; o.cx2=c.c2x; o.cy2=c.c2y;
+  }
   if(isLine(o)){o.x2=p.x;o.y2=p.y;}
 }
 function isDegenerate(o){
   if(o.type==='circle')  return o.r<5;
   if(o.type==='ellipse') return o.rx<5||o.ry<5;
   if(o.type==='rect')    return o.w<5||o.h<5;
+  if(o.type==='polyline'){
+    const pts=o.points||[];
+    if(pts.length<2) return true;
+    let len=0;
+    for(let i=1;i<pts.length;i++) len+=Math.hypot(pts[i][0]-pts[i-1][0], pts[i][1]-pts[i-1][1]);
+    return len<8;
+  }
+  if(o.type==='quadratic') return Math.hypot(o.x2-o.x1,o.y2-o.y1)<8;
+  if(o.type==='cubic')     return Math.hypot(o.x2-o.x1,o.y2-o.y1)<8;
   if(isLine(o))          return Math.hypot(o.x2-o.x1,o.y2-o.y1)<8;
   return false;
 }
@@ -151,7 +254,7 @@ function syncProps(){
   document.getElementById('r-sel').style.display=o?'block':'none';
   if(!o)return;
   document.getElementById('r-badge').textContent=TYPE_NAME[o.type]||o.type;
-  const isText=o.type==='text',isL=isLine(o),isImg=o.type==='image';
+  const isText=o.type==='text',isL=isLine(o)||o.type==='polyline'||o.type==='bezier'||o.type==='quadratic'||o.type==='cubic',isImg=o.type==='image';
   document.getElementById('r-line-sec').style.display=(isText||isImg)?'none':'';
   document.getElementById('r-fill-sec').style.display=(isText||isL||isImg)?'none':'';
   document.getElementById('r-obj-op-sec').style.display=isText?'none':'';
@@ -180,8 +283,9 @@ function syncProps(){
   }
   document.getElementById('r-wh-row').style.display=isText?'none':'';
   const bb=bbox(o);
-  if(o.type==='circle'||o.type==='ellipse'){setV('r-x',Math.round(o.cx));setV('r-y',Math.round(o.cy));}
-  else if(isL){setV('r-x',Math.round(o.x1));setV('r-y',Math.round(o.y1));}
+  if(o.type==='circle'||o.type==='ellipse'||o.type==='arc'){setV('r-x',Math.round(o.cx));setV('r-y',Math.round(o.cy));}
+  else if(isLine(o)){setV('r-x',Math.round(o.x1));setV('r-y',Math.round(o.y1));}
+  else if(o.type==='quadratic'||o.type==='cubic'||o.type==='polyline'||o.type==='bezier'||o.type==='polygon'){setV('r-x',Math.round(bb.x));setV('r-y',Math.round(bb.y));}
   else{setV('r-x',Math.round(o.x));setV('r-y',Math.round(o.y));}
   if(bb&&!isText){setV('r-w',Math.round(bb.w));setV('r-h',Math.round(bb.h));}
 }
@@ -209,8 +313,8 @@ document.getElementById('r-tc').addEventListener('input',e=>pc(o=>o.tc=e.target.
 document.getElementById('r-bold').addEventListener('click',()=>pc(o=>o.bold=!o.bold));
 document.getElementById('r-italic').addEventListener('click',()=>pc(o=>o.italic=!o.italic));
 ['r-al-m','r-al-s','r-al-e'].forEach(id=>document.getElementById(id).addEventListener('click',()=>pc(o=>o.align=document.getElementById(id).dataset.align)));
-document.getElementById('r-x').addEventListener('change',e=>pc(o=>{const v=parseInt(e.target.value)||0;if(o.type==='circle'||o.type==='ellipse')o.cx=v;else if(isLine(o)){const d=v-o.x1;o.x1=v;o.x2+=d;}else o.x=v;}));
-document.getElementById('r-y').addEventListener('change',e=>pc(o=>{const v=parseInt(e.target.value)||0;if(o.type==='circle'||o.type==='ellipse')o.cy=v;else if(isLine(o)){const d=v-o.y1;o.y1=v;o.y2+=d;}else o.y=v;}));
-document.getElementById('r-w').addEventListener('change',e=>pc(o=>{const v=Math.max(4,parseInt(e.target.value)||4);if(o.type==='circle')o.r=v/2;else if(o.type==='ellipse')o.rx=v/2;else if(o.type==='rect'||o.type==='image')o.w=v;else if(isLine(o))o.x2=o.x1+v;}));
-document.getElementById('r-h').addEventListener('change',e=>pc(o=>{const v=Math.max(4,parseInt(e.target.value)||4);if(o.type==='circle')o.r=v/2;else if(o.type==='ellipse')o.ry=v/2;else if(o.type==='rect'||o.type==='image')o.h=v;else if(isLine(o))o.y2=o.y1+v;}));
+document.getElementById('r-x').addEventListener('change',e=>pc(o=>{const v=parseInt(e.target.value)||0;if(o.type==='circle'||o.type==='ellipse'||o.type==='arc')o.cx=v;else if(isLine(o)){const d=v-o.x1;o.x1=v;o.x2+=d;}else if(o.type==='quadratic'||o.type==='cubic'){const bb=bbox(o); moveObj(o,v-bb.x,0);}else if(o.type==='polyline'||o.type==='polygon'||o.type==='bezier'){const bb=bbox(o); const d=v-bb.x; o.points=o.points.map(([x,y])=>[x+d,y]);}else o.x=v;}));
+document.getElementById('r-y').addEventListener('change',e=>pc(o=>{const v=parseInt(e.target.value)||0;if(o.type==='circle'||o.type==='ellipse'||o.type==='arc')o.cy=v;else if(isLine(o)){const d=v-o.y1;o.y1=v;o.y2+=d;}else if(o.type==='quadratic'||o.type==='cubic'){const bb=bbox(o); moveObj(o,0,v-bb.y);}else if(o.type==='polyline'||o.type==='polygon'||o.type==='bezier'){const bb=bbox(o); const d=v-bb.y; o.points=o.points.map(([x,y])=>[x,y+d]);}else o.y=v;}));
+document.getElementById('r-w').addEventListener('change',e=>pc(o=>{const v=Math.max(4,parseInt(e.target.value)||4);if(o.type==='circle')o.r=v/2;else if(o.type==='ellipse'||o.type==='arc')o.rx=v/2;else if(o.type==='rect'||o.type==='image')o.w=v;else if(isLine(o))o.x2=o.x1+v;}));
+document.getElementById('r-h').addEventListener('change',e=>pc(o=>{const v=Math.max(4,parseInt(e.target.value)||4);if(o.type==='circle')o.r=v/2;else if(o.type==='ellipse'||o.type==='arc')o.ry=v/2;else if(o.type==='rect'||o.type==='image')o.h=v;else if(isLine(o))o.y2=o.y1+v;}));
 document.getElementById('r-del').addEventListener('click',()=>{if(!selId)return;saveState();objects=objects.filter(o=>o.id!==selId);selId=null;render();syncProps();});
