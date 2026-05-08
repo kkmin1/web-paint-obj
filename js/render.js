@@ -71,6 +71,13 @@ function richSegments(text) {
   return out;
 }
 
+function latexCellInfo(text) {
+  const s = String(text || '').trim();
+  if (s.length >= 4 && s.startsWith('$$') && s.endsWith('$$')) return { tex:s.slice(2, -2), displayMode:true };
+  if (s.length >= 2 && s.startsWith('$') && s.endsWith('$')) return { tex:s.slice(1, -1), displayMode:false };
+  return null;
+}
+
 function bezierPath(points) {
   if (!points || points.length < 2) return '';
   if (points.length === 2) return `M ${points[0][0]} ${points[0][1]} L ${points[1][0]} ${points[1][1]}`;
@@ -147,11 +154,15 @@ function render() {
   objects.forEach(o => {
     const el = makeEl(o); if (!el) return;
     el.dataset.oid = o.id;
-    if (o.id === selId) el.setAttribute('filter', 'url(#sel-shadow)');
+    if (o.id === selId && !hasForeignObject(el)) el.setAttribute('filter', 'url(#sel-shadow)');
     cvSvg.appendChild(el);
   });
   if (selId) { const o = getObj(selId); if (o) drawHandles(o); }
   updateSB();
+}
+
+function hasForeignObject(el) {
+  return el.localName === 'foreignObject' || !!el.querySelector?.('foreignObject');
 }
 
 function makeEl(o) {
@@ -180,25 +191,109 @@ function makeEl(o) {
     const ms = (o.arrow==='start'||o.arrow==='both') ? marker(o.stroke) : 'none';
     el = ns('line', { x1:o.x1, y1:o.y1, x2:o.x2, y2:o.y2, stroke:o.stroke, 'stroke-width':o.sw, 'stroke-dasharray':dash, 'stroke-linecap':'round', 'marker-end':me, 'marker-start':ms, opacity:op });
   } else if (o.type==='text') {
-    el = ns('text', { x:o.x, y:o.y, 'font-size':o.fs||14, fill:o.tc||'#1a1a18', 'font-weight':o.bold?'700':'400', 'font-style':o.italic?'italic':'normal', 'text-anchor':o.align||'middle', 'dominant-baseline':'central', 'font-family':"'Pretendard','Apple SD Gothic Neo',sans-serif", opacity:op });
-    const parts = richSegments(o.text || '');
-    if (!parts.some(p => p.kind !== 'base')) el.textContent = o.text || '';
-    else {
-      parts.forEach(part => {
-        const t = ns('tspan', {});
-        if (part.kind === 'sub') {
-          t.setAttribute('baseline-shift', '-22%');
-          t.setAttribute('font-size', `${((o.fs||14) * 0.68).toFixed(1)}px`);
-          t.setAttribute('dx', `${-((o.fs||14) * 0.18).toFixed(1)}`);
-        }
-        t.textContent = part.text;
-        el.appendChild(t);
-      });
-    }
+    el = makeTextEl(o, op);
   } else if (o.type==='image') {
     el = ns('image', { x:o.x, y:o.y, width:o.w, height:o.h, href:o.href, preserveAspectRatio:'xMidYMid meet', opacity:op });
+  } else if (o.type==='table') {
+    el = makeTableEl(o, op);
   }
   return el || null;
+}
+
+function makeTextEl(o, op) {
+  const text = o.text || '';
+  const math = latexCellInfo(text);
+  if (math && window.katex) {
+    const fs = o.fs || 14;
+    const w = Math.max(36, String(math.tex).length * fs * 0.62 + 24);
+    const h = Math.max(24, fs * (math.displayMode ? 2.2 : 1.7));
+    const ax = o.align === 'start' ? o.x : o.align === 'end' ? o.x - w : o.x - w / 2;
+    const justify = o.align === 'start' ? 'flex-start' : o.align === 'end' ? 'flex-end' : 'center';
+    const fo = ns('foreignObject', { x:ax, y:o.y-h/2, width:w, height:h, opacity:op, 'pointer-events':'none' });
+    const div = document.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+    div.setAttribute('style', `width:100%;height:100%;display:flex;align-items:center;justify-content:${justify};overflow:visible;color:${o.tc||'#1a1a18'};font-size:${fs}px;font-weight:${o.bold?'700':'400'};font-style:${o.italic?'italic':'normal'};`);
+    try {
+      window.katex.render(math.tex, div, { throwOnError:false, displayMode:math.displayMode });
+      fo.appendChild(div);
+      return fo;
+    } catch (err) {
+      return makePlainTextEl(o, op);
+    }
+  }
+  return makePlainTextEl(o, op);
+}
+
+function makePlainTextEl(o, op) {
+  const el = ns('text', { x:o.x, y:o.y, 'font-size':o.fs||14, fill:o.tc||'#1a1a18', 'font-weight':o.bold?'700':'400', 'font-style':o.italic?'italic':'normal', 'text-anchor':o.align||'middle', 'dominant-baseline':'central', 'font-family':"'Pretendard','Apple SD Gothic Neo',sans-serif", opacity:op });
+  const parts = richSegments(o.text || '');
+  if (!parts.some(p => p.kind !== 'base')) el.textContent = o.text || '';
+  else {
+    parts.forEach(part => {
+      const t = ns('tspan', {});
+      if (part.kind === 'sub') {
+        t.setAttribute('baseline-shift', '-22%');
+        t.setAttribute('font-size', `${((o.fs||14) * 0.68).toFixed(1)}px`);
+        t.setAttribute('dx', `${-((o.fs||14) * 0.18).toFixed(1)}`);
+      }
+      t.textContent = part.text;
+      el.appendChild(t);
+    });
+  }
+  return el;
+}
+
+function makeTableEl(o, op) {
+  const g = ns('g', { opacity:op });
+  const w = tableW(o), h = tableH(o);
+  const fill = fillColor(o);
+  g.appendChild(ns('rect', { x:o.x, y:o.y, width:w, height:h, fill, stroke:o.stroke, 'stroke-width':o.sw }));
+
+  let x = o.x;
+  for (let c = 1; c < o.cols; c++) {
+    x += o.colWidths[c - 1] || 0;
+    g.appendChild(ns('line', { x1:x, y1:o.y, x2:x, y2:o.y+h, stroke:o.stroke, 'stroke-width':o.sw, 'data-table-edge':'col', 'data-index':c, 'data-oid':o.id, cursor:'col-resize' }));
+  }
+  let y = o.y;
+  for (let r = 1; r < o.rows; r++) {
+    y += o.rowHeights[r - 1] || 0;
+    g.appendChild(ns('line', { x1:o.x, y1:y, x2:o.x+w, y2:y, stroke:o.stroke, 'stroke-width':o.sw, 'data-table-edge':'row', 'data-index':r, 'data-oid':o.id, cursor:'row-resize' }));
+  }
+
+  y = o.y;
+  for (let r = 0; r < o.rows; r++) {
+    x = o.x;
+    for (let c = 0; c < o.cols; c++) {
+      const text = (o.cells?.[r]?.[c] || '').trim();
+      if (text) {
+        const cw = o.colWidths[c] || 0;
+        const rh = o.rowHeights[r] || 0;
+        const math = latexCellInfo(text);
+        if (math && window.katex) {
+          const fo = ns('foreignObject', { x:x+3, y:y+2, width:Math.max(1,cw-6), height:Math.max(1,rh-4), 'pointer-events':'none' });
+          const div = document.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+          div.setAttribute('style', `width:100%;height:100%;display:flex;align-items:center;justify-content:center;overflow:hidden;color:${o.tc||'#1a1a18'};font-size:${o.fs||13}px;`);
+          try {
+            window.katex.render(math.tex, div, { throwOnError:false, displayMode:math.displayMode });
+            fo.appendChild(div);
+            g.appendChild(fo);
+          } catch (err) {
+            g.appendChild(makeTableText(text, x, y, cw, rh, o));
+          }
+        } else {
+          g.appendChild(makeTableText(text, x, y, cw, rh, o));
+        }
+      }
+      x += o.colWidths[c] || 0;
+    }
+    y += o.rowHeights[r] || 0;
+  }
+  return g;
+}
+
+function makeTableText(text, x, y, w, h, o) {
+  const t = ns('text', { x:x + w/2, y:y + h/2, 'font-size':o.fs||13, fill:o.tc||'#1a1a18', 'text-anchor':'middle', 'dominant-baseline':'central', 'font-family':"'Pretendard','Apple SD Gothic Neo',sans-serif", 'pointer-events':'none' });
+  t.textContent = text;
+  return t;
 }
 
 function drawHandles(o) {

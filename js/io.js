@@ -251,6 +251,26 @@ function buildTikzBundle(baseName = `ks_diagram_${ts()}`) {
       out.push(`  \\draw[${tikzStyle(o, stroke, tikzFill(o, fill))}] ${polyPoints(o.points, true)};`);
     } else if (o.type === 'rect') {
       out.push(`  \\draw[${tikzStyle(o, stroke, tikzFill(o, fill))}] (${tikzX(o.x)}, ${tikzY(o.y)}) rectangle (${tikzX(o.x + o.w)}, ${tikzY(o.y + o.h)});`);
+    } else if (o.type === 'table') {
+      let y = o.y;
+      for (let r = 0; r < o.rows; r++) {
+        let x = o.x;
+        for (let c = 0; c < o.cols; c++) {
+          const w = o.colWidths[c] || 0;
+          const h = o.rowHeights[r] || 0;
+          out.push(`  \\draw[${tikzStyle(o, stroke, tikzFill(o, fill))}] (${tikzX(x)}, ${tikzY(y)}) rectangle (${tikzX(x + w)}, ${tikzY(y + h)});`);
+          const cellText = o.cells?.[r]?.[c] || '';
+          if (cellText) {
+            const extra = [`text=${text}`, `font=\\fontsize{${o.fs || 13}}{${(o.fs || 13) + 2}}\\selectfont`];
+            if ((o.opacity ?? 1) !== 1) extra.push(`opacity=${num(o.opacity ?? 1)}`);
+            const math = latexCellInfo(cellText);
+            const body = math ? `$${math.displayMode ? '\\displaystyle ' : ''}${math.tex}$` : texEsc(cellText);
+            out.push(`  \\node[${extra.join(', ')}] at (${tikzX(x + w / 2)}, ${tikzY(y + h / 2)}) {${body}};`);
+          }
+          x += w;
+        }
+        y += o.rowHeights[r] || 0;
+      }
     } else if (o.type === 'circle') {
       out.push(`  \\draw[${tikzStyle(o, stroke, tikzFill(o, fill))}] (${tikzX(o.cx)}, ${tikzY(o.cy)}) circle (${num(o.r / 40)}cm);`);
     } else if (o.type === 'ellipse') {
@@ -268,7 +288,9 @@ function buildTikzBundle(baseName = `ks_diagram_${ts()}`) {
       if ((o.opacity ?? 1) !== 1) extra.push(`opacity=${num(o.opacity ?? 1)}`);
       if (o.align === 'start') extra.push('anchor=west');
       else if (o.align === 'end') extra.push('anchor=east');
-      out.push(`  \\node[${extra.join(', ')}] at (${tikzX(o.x)}, ${tikzY(o.y)}) {${texEsc(o.text || '')}};`);
+      const math = latexCellInfo(o.text || '');
+      const body = math ? `$${math.displayMode ? '\\displaystyle ' : ''}${math.tex}$` : texEsc(o.text || '');
+      out.push(`  \\node[${extra.join(', ')}] at (${tikzX(o.x)}, ${tikzY(o.y)}) {${body}};`);
     } else if (o.type === 'quadratic') {
       out.push(`  \\draw[${tikzStyle(o, stroke)}] (${tikzX(o.x1)}, ${tikzY(o.y1)}) .. controls (${tikzX(o.cx1)}, ${tikzY(o.cy1)}) .. (${tikzX(o.x2)}, ${tikzY(o.y2)});`);
     } else if (o.type === 'cubic') {
